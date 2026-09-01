@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bytes"
+	//"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,6 +35,7 @@ type Task struct {
 	ID     string `json:"id"`
 	Status string `json:"status"` // "pending", "processing", "completed", "error"
 	Result string `json:"result,omitempty"`
+	Timestamp time.Time `json:"timestamp,omitempty"`
 }
 
 // Esta es la estructura que envías de vuelta a Linux lista para Ollama
@@ -46,12 +47,19 @@ type EstructuraParaOllama struct {
 
 // Estructura que viaja por el buzón hacia la Linux local con todo el estado del checkpoint
 type MensajeCheckpointBuzon struct {
-	IDPadre        string    `json:"id_padre"`
-	Total          int       `json:"total"`
-	Procesados     int       `json:"procesados"`
-	UltimoAuditado string    `json:"ultimo_auditado"`
-	EstadoForzado  string    `json:"estado_forzado"`
-	Timestamp      time.Time `json:"timestamp"`
+    TipoAccion         string    `json:"tipo_accion"`          // "CHECKPOINT" o "AUDITAR_CHUNK"
+    IDPadre            string    `json:"id_padre"`             // Identificador de la tarea global
+    FilePath           string    `json:"file_path,omitempty"`           // Ruta o nombre del archivo actual
+    Contenido          string    `json:"contenido,omitempty"`           // Contenido para guardar en Vault
+    ContenidoCodigo    string    `json:"contenido_codigo,omitempty"`    // Fragmento de código puro para Ollama local
+    Total              int       `json:"total"`                // Total de elementos de la tarea
+    Procesados         int       `json:"procesados"`           // Conteo de elementos listos
+    UltimoAuditado     string    `json:"ultimo_auditado"`      // Nombre del último archivo procesado
+    EstadoForzado      string    `json:"estado_forzado"`       // Estado global forzado (ej. "COMPLETADO")
+    TamanioBytes       int64     `json:"tamanio_bytes"`        // Peso para telemetría de red
+    TimestampInyeccion time.Time `json:"timestamp_inyeccion"`  // Hora de salida desde la nube
+    TimestampRespuesta time.Time `json:"timestamp_respuesta"`  // Hora de llegada / respuesta
+    Timestamp          time.Time `json:"timestamp"`            // Sello de tiempo general
 }
 
 var (
@@ -70,6 +78,8 @@ func main() {
 	http.HandleFunc("/api/node/pending", handleGetPendingTask)
 	http.HandleFunc("/api/node/result", handlePostTaskResult)
 
+	
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "GeoChat Backend Coordinator is running securely.")
 	})
@@ -82,6 +92,12 @@ func main() {
 var ultimoCheckpointEnviado MensajeCheckpointBuzon
 var hayCheckpointPendiente bool
 var muBuzonSync sync.Mutex
+
+var (
+    muBuzonResultados     sync.Mutex
+    ultimaTaskEntrada     Task
+    hayResultadoPendiente bool
+)
 
 // Función en Render que actualiza el estado y lo deja disponible en el buzón de la nube
 func actualizarCheckpointProgreso(idPadre string, total int, procesados int, ultimoAuditado string, estadoForzado string) {
@@ -100,6 +116,7 @@ func actualizarCheckpointProgreso(idPadre string, total int, procesados int, ult
     }
 
     ultimoCheckpointEnviado = MensajeCheckpointBuzon{
+		TipoAccion:     "CHECKPOINT", // 👈 Acá le avisas explícitamente al worker que esto es un checkpoint
         IDPadre:        idPadre,
         Total:          total,
         Procesados:     procesados,
@@ -168,17 +185,13 @@ func handleTasks(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(list)
 }
 
-func enviarSintesisAOllamaRemoto(nombreArchivo string, hallazgosConsolidados string, totalChunks int) (string, error) {
+func enviarSintesisAOllamaRemoto(taskID string, nombreArchivo string, hallazgosConsolidados string, totalChunks int) (string, error) {
     horaSalida := time.Now()
 
-    fmt.Printf("🧠 [☁️ RENDER - SÍNTESIS EMISOR]: Despachando síntesis global -> Archivo: %s | Partes procesadas: %d | Salida: %s\n",
+    fmt.Printf("🧠 [☁️ RENDER - SÍNTESIS EMISOR]: Empaquetando síntesis global en el buzón -> Archivo: %s | Partes: %d | Salida: %s\n",
         nombreArchivo, totalChunks, horaSalida.Format("15:04:05.000"))
 
-    urlOllamaNube := os.Getenv("OLLAMA_CLOUD_URL")
-    if urlOllamaNube == "" {
-        urlOllamaNube = "http://localhost:11434/api/generate"
-    }
-
+    // 1. Render arma el prompt maestro con toda la sintergia
     promptSintesis := fmt.Sprintf(
         `[SÍNTESIS GLOBAL Y CONSOLIDACIÓN DE FRAGMENTOS] 
         Actúa como Arquitecto Master de GeoChat sintonizado a 432Hz. 
@@ -197,37 +210,24 @@ func enviarSintesisAOllamaRemoto(nombreArchivo string, hallazgosConsolidados str
         hallazgosConsolidados,
     )
 
-    payload := map[string]interface{}{
-        "model":  "gemma2:2b",
-        "prompt": promptSintesis,
-        "stream": false,
-        "options": map[string]interface{}{
-            "num_ctx": 8192,
-        },
-    }
+    // 2. Bloqueamos el buzón y dejamos el paquete
+    muBuzonSync.Lock()
+    defer muBuzonSync.Unlock()
 
-    jsonBody, err := json.Marshal(payload)
-    if err != nil {
-        return "", err
+    ultimoCheckpointEnviado = MensajeCheckpointBuzon{
+        TipoAccion:         "SINTESIS_GLOBAL", // 👈 El tercer caso del switch
+        IDPadre:            taskID,
+        FilePath:           nombreArchivo,
+        ContenidoCodigo:    promptSintesis,    // Mandamos el prompt completo armado por Render
+        Total:              totalChunks,
+        TimestampInyeccion: time.Now(),
+        Timestamp:          time.Now(),
     }
+    hayCheckpointPendiente = true
 
-    client := &http.Client{Timeout: 900 * time.Second}
-    resp, err := client.Post(urlOllamaNube, "application/json", bytes.NewBuffer(jsonBody))
-    if err != nil {
-        return "", err
-    }
-    defer resp.Body.Close()
+    log.Printf("☁️ [RENDER - BUZÓN PULL]: Orden de Síntesis depositada. Esperando que el Worker local la retire...\n")
 
-    var result map[string]interface{}
-    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-        return "", err
-    }
-
-    if responseText, ok := result["response"].(string); ok {
-        return responseText, nil
-    }
-
-    return "Síntesis global completada sin respuesta de texto explícita.", nil
+    return "Síntesis despachada al buzón correctamente", nil
 }
 
 func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
@@ -288,7 +288,7 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
 			maxIntentos := 2
 
 			for intento := 1; intento <= maxIntentos; intento++ {
-				respuestaChunk, errOllama = enviarAOllamaRemoto(chunkCodigo)
+				respuestaChunk, errOllama = enviarAOllamaRemoto(taskID, chunkCodigo)
 				if errOllama == nil {
 					break
 				}
@@ -326,6 +326,7 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
 			log.Println("🧠 [☁️ RENDER - SÍNTESIS GLOBAL]: Alimentando al modelo con las respuestas parciales para obtener el veredicto final...")
 
 			dictamenFinal, errSintesis := enviarSintesisAOllamaRemoto(
+				taskID,
 				currentFilePath,
 				hallazgosConsolidados.String(),
 				totalChunks,
@@ -372,42 +373,51 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
 	log.Printf("✨ [RENDER]: Tarea %s completada al 100%% en la nube.\n", taskID)
 }
 
-func enviarAOllamaRemoto(codigo string) (string, error) {
-	// URL o endpoint del servicio de IA / Ollama configurado en la nube de Render
-	urlOllamaNube := os.Getenv("OLLAMA_CLOUD_URL")
-	if urlOllamaNube == "" {
-		urlOllamaNube = "http://localhost:11434/api/generate" // O la URL de tu servicio de IA remoto
-	}
+func enviarAOllamaRemoto(taskID string, chunkCodigo string) (string, error) {
+    pesoBytes := int64(len(chunkCodigo))
 
-	payload := map[string]interface{}{
-		"model":  "llama3", // O el modelo que utilices
-		"prompt": "Realiza la auditoría y análisis de este bloque de código:\n" + codigo,
-		"stream": false,
-	}
+    // 1️⃣ DEPOSITAMOS EL CHUNK EN EL BUZÓN DE SALIDA DE RENDER
+    muBuzonSync.Lock()
+    ultimoCheckpointEnviado = MensajeCheckpointBuzon{
+        TipoAccion:         "AUDITAR_CHUNK",
+        IDPadre:            taskID,
+        ContenidoCodigo:    chunkCodigo,
+        TamanioBytes:       pesoBytes,
+        TimestampInyeccion: time.Now(),
+        Timestamp:          time.Now(),
+    }
+    hayCheckpointPendiente = true
+    muBuzonSync.Unlock()
 
-	jsonBytes, err := json.Marshal(payload)
-	if err != nil {
-		return "", err
-	}
+    log.Printf("☁️ [RENDER - BUZÓN PULL]: Chunk enviado al buzón. Esperando que la Linux local lo procese y devuelva...\n")
 
-	resp, err := http.Post(urlOllamaNube, "application/json", bytes.NewBuffer(jsonBytes))
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
+    // 2️⃣ BUCLE DE ESPERA INTELIGENTE (POLLING) HASTA QUE EL WORKER LOCAL DEVUELVA EL RESULTADO
+    // Espera hasta 15 minutos de margen para que Ollama local procese bloques grandes
+    timeout := time.After(900 * time.Second)
+    ticker := time.NewTicker(2 * time.Second)
+    defer ticker.Stop()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("error en IA remota, status: %d", resp.StatusCode)
-	}
+    for {
+        select {
+        case <-timeout:
+            return "", fmt.Errorf("timeout: la Linux local no devolvió el resultado del chunk a tiempo")
+        case <-ticker.C:
+           muBuzonResultados.Lock()
+            if hayResultadoPendiente {
+                // 🔍 Validación estricta: solo lo aceptamos si el ID coincide exactamente
+                if ultimaTaskEntrada.ID == taskID {
+                    resultadoLocal := ultimaTaskEntrada.Result
+                    
+                    hayResultadoPendiente = false
+                    muBuzonResultados.Unlock()
 
-	var resultado struct {
-		Response string `json:"response"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&resultado); err != nil {
-		return "", err
-	}
-
-	return resultado.Response, nil
+                    log.Printf("✨ [RENDER - BUZÓN]: ¡Respuesta del chunk validada y sincronizada para el taskID [%s]!\n", taskID)
+                    return resultadoLocal, nil
+                }
+            }
+            muBuzonResultados.Unlock()
+        }
+    }
 }
 
 func handleGetPendingTask(w http.ResponseWriter, r *http.Request) {
@@ -427,27 +437,38 @@ func handleGetPendingTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func handlePostTaskResult(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+    if r.Method != http.MethodPost {
+        http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+        return
+    }
 
-	var res Task
-	if err := json.NewDecoder(r.Body).Decode(&res); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+    var res Task
+    if err := json.NewDecoder(r.Body).Decode(&res); err != nil {
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
+    res.Timestamp = time.Now()
 
-	mu.Lock()
-	defer mu.Unlock()
+    // 1️⃣ Actualizamos el mapa general de tareas (tu lógica original)
+    mu.Lock()
+    if t, exists := tasks[res.ID]; exists {
+        t.Status = "completed"
+        t.Result = res.Result
+        tasks[res.ID] = t
+    } else {
+        // Opcional por si entra directo al buzón sin pasar por el mapa clásico
+        log.Printf("⚠️ [AVISO TAREA]: La tarea ID [%s] llegó al resultado pero no estaba en el mapa de tasks.\n", res.ID)
+    }
+    mu.Unlock()
 
-	if t, exists := tasks[res.ID]; exists {
-		t.Status = "completed"
-		t.Result = res.Result
-		tasks[res.ID] = t
-		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, `{"status":"success"}`)
-		return
-	}
-	http.Error(w, "Task not found", http.StatusNotFound)
+    // 2️⃣ Alimentamos el buzón de entrada para que el polling de enviarAOllamaRemoto lo despierte al instante
+    muBuzonResultados.Lock()
+    ultimaTaskEntrada = res
+    hayResultadoPendiente = true
+    muBuzonResultados.Unlock()
+
+    log.Printf("📥 [RENDER - BUZÓN ENTRADA]: Resultado sincronizado y registrado para la tarea ID [%s]\n", res.ID)
+
+    w.WriteHeader(http.StatusOK)
+    io.WriteString(w, `{"status":"success"}`)
 }
