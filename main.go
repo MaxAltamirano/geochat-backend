@@ -210,24 +210,49 @@ func enviarSintesisAOllamaRemoto(taskID string, nombreArchivo string, hallazgosC
         hallazgosConsolidados,
     )
 
-    // 2. Bloqueamos el buzón y dejamos el paquete
+    // 2. Depositamos la orden en el buzón de salida
     muBuzonSync.Lock()
-    defer muBuzonSync.Unlock()
-
     ultimoCheckpointEnviado = MensajeCheckpointBuzon{
-        TipoAccion:         "SINTESIS_GLOBAL", // 👈 El tercer caso del switch
+        TipoAccion:         "SINTESIS_GLOBAL",
         IDPadre:            taskID,
         FilePath:           nombreArchivo,
-        ContenidoCodigo:    promptSintesis,    // Mandamos el prompt completo armado por Render
+        ContenidoCodigo:    promptSintesis,
         Total:              totalChunks,
         TimestampInyeccion: time.Now(),
         Timestamp:          time.Now(),
     }
     hayCheckpointPendiente = true
+    muBuzonSync.Unlock()
 
-    log.Printf("☁️ [RENDER - BUZÓN PULL]: Orden de Síntesis depositada. Esperando que el Worker local la retire...\n")
+    log.Printf("☁️ [RENDER - BUZÓN PULL]: Orden de Síntesis depositada para el taskID [%s]. Esperando que el Worker local la procese y devuelva...\n", taskID)
 
-    return "Síntesis despachada al buzón correctamente", nil
+    // 3️⃣ BUCLE DE ESPERA INTELIGENTE (POLLING) CON VALIDACIÓN ESTRICTA DE taskID
+    timeout := time.After(900 * time.Second) // 15 minutos para que Ollama procese la síntesis global
+    ticker := time.NewTicker(2 * time.Second)
+    defer ticker.Stop()
+
+    for {
+        select {
+        case <-timeout:
+            return "", fmt.Errorf("timeout: la Linux local no devolvió el dictamen de síntesis global para el taskID [%s] a tiempo", taskID)
+        case <-ticker.C:
+            muBuzonResultados.Lock()
+            if hayResultadoPendiente {
+                // 🔍 Validación estricta: nos aseguramos de que el resultado pertenezca exactamente a esta tarea de síntesis
+                if ultimaTaskEntrada.ID == taskID {
+                    dictamenFinal := ultimaTaskEntrada.Result
+                    
+                    // Limpiamos el buzón y liberamos el mutex
+                    hayResultadoPendiente = false
+                    muBuzonResultados.Unlock()
+
+                    log.Printf("✨ [RENDER - BUZÓN]: ¡Dictamen de síntesis global capturado y validado para el taskID [%s]!\n", taskID)
+                    return dictamenFinal, nil
+                }
+            }
+            muBuzonResultados.Unlock()
+        }
+    }
 }
 
 func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
