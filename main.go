@@ -305,7 +305,7 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
 
 			pesoTotalBytes += int64(len(chunkCodigo))
 
-			log.Printf("📦 [☁️ RENDER - CHUNKING]: Procesando parte %d de %d del archivo %s...\n", numParte, totalChunks, currentFilePath)
+			log.Printf("[🔵 AUDITORÍA]: Procesando parte %d de %d del archivo %s...\n", numParte, totalChunks, currentFilePath)
 
 			// 🛡️ Mecanismo de reintento inteligente ante cortes abruptos
 			var respuestaChunk string
@@ -348,7 +348,7 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
 				Timestamp:         time.Now(),
 			})
 		} else {
-			log.Println("🧠 [☁️ RENDER - SÍNTESIS GLOBAL]: Alimentando al modelo con las respuestas parciales para obtener el veredicto final...")
+			log.Println("[🔵 AUDITORÍA]:- SÍNTESIS GLOBAL]: Alimentando al modelo con las respuestas parciales para obtener el veredicto final...")
 
 			dictamenFinal, errSintesis := enviarSintesisAOllamaRemoto(
 				taskID,
@@ -368,7 +368,7 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
 					Timestamp:         time.Now(),
 				})
 			} else {
-				log.Println("☁️ - ✅ [RENDER - ÉXITO TOTAL]: Síntesis global completada en la nube.")
+				log.Println("[🔵 AUDITORÍA]:☁️ - ✅ [RENDER - ÉXITO TOTAL]: Síntesis global completada en la nube.")
 
 				nuevoDoc := DocumentacionAnalisis{
 					FilePath:             currentFilePath,
