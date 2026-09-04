@@ -60,6 +60,7 @@ type MensajeCheckpointBuzon struct {
     TimestampInyeccion time.Time `json:"timestamp_inyeccion"`  // Hora de salida desde la nube
     TimestampRespuesta time.Time `json:"timestamp_respuesta"`  // Hora de llegada / respuesta
     Timestamp          time.Time `json:"timestamp"`            // Sello de tiempo general
+	Documentos           []DocumentacionAnalisis   `json:"documentos,omitempty"`
 }
 
 var (
@@ -255,6 +256,24 @@ func enviarSintesisAOllamaRemoto(taskID string, nombreArchivo string, hallazgosC
     }
 }
 
+func ArchivarAuditoriaGlobalRemoto(idSesion string, documentos []DocumentacionAnalisis) error {
+    muBuzonSync.Lock()
+    defer muBuzonSync.Unlock()
+
+    // Empaquetamos la acción para que el worker local la retire en su próximo Pull/Ticker
+    ultimoCheckpointEnviado = MensajeCheckpointBuzon{
+        TipoAccion:  "ARCHIVAR_GLOBAL", // 👈 El tipo de acción que atrapará el case en tu worker local
+        IDPadre:     idSesion,
+        Documentos:  documentos,        // Asegurate de que tu struct MensajeCheckpointBuzon tenga este campo
+        Timestamp:   time.Now(),
+    }
+    hayCheckpointPendiente = true
+
+    log.Printf("☁️ [RENDER - BUZÓN SYNC]: Paquete de Archivo Global empaquetado para el Worker local -> Sesión: %s (%d documentos)\n",
+        idSesion, len(documentos))
+
+    return nil
+}
 func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
 	total := len(payload.ListaArchivos)
 	if total == 0 {
@@ -385,11 +404,11 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
 			}
 		}
 
-		// 💾 Guardado global y actualización del checkpoint local/remoto
-		//errGlobal := ArchivarAuditoriaGlobal(payload.IDPadre, documentosAuditados)
-		//if errGlobal != nil {
-		//	log.Printf("❌ [RENDER]: Error al archivar auditoría global: %v\n", errGlobal)
-		//}
+		//💾 Guardado global y actualización del checkpoint local/remoto
+		errGlobal := ArchivarAuditoriaGlobalRemoto(payload.IDPadre, documentosAuditados)
+		if errGlobal != nil {
+			log.Printf("❌ [RENDER]: Error al archivar auditoría global: %v\n", errGlobal)
+		}
 
 		actualizarCheckpointProgreso(payload.IDPadre, total, i+1, currentFilePath, "AUDITANDO")
 	}
