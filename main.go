@@ -274,6 +274,7 @@ func ArchivarAuditoriaGlobalRemoto(idSesion string, documentos []DocumentacionAn
 
     return nil
 }
+
 func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
 	total := len(payload.ListaArchivos)
 	if total == 0 {
