@@ -25,11 +25,7 @@ type DocumentacionAnalisis struct {
 	TieneRecomendaciones bool      `json:"tiene_recomendaciones"`
 }
 
-type TaskPayload struct {
-	IDPadre       string   `json:"id_padre"`
-	ListaArchivos []string `json:"lista_archivos"`
-	IndiceInicio  int      `json:"indice_inicio"`
-}
+
 
 type Task struct {
 	ID     string `json:"id"`
@@ -147,43 +143,59 @@ func HandleObtenerCheckpointBuzon(w http.ResponseWriter, r *http.Request) {
     hayCheckpointPendiente = false // Se consume y se limpia el buzón
 }
 
+type TaskPayload struct {
+    IDPadre       string   `json:"id_padre"`
+    ListaArchivos []string `json:"lista_archivos"`
+    IndiceInicio  int      `json:"indice_inicio"`
+    Total         int      `json:"total"`
+}
+
+// 📦 Declaración global a nivel de paquete (fuera de cualquier función)
+var colaTareasGlobal TaskPayload
+
 func handleTasks(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	if r.Method == http.MethodPost {
-		var payload TaskPayload
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+    w.Header().Set("Content-Type", "application/json")
+    
+    if r.Method == http.MethodPost {
+        var payload TaskPayload
+        if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+            http.Error(w, err.Error(), http.StatusBadRequest)
+            return
+        }
 
-		mu.Lock()
-		taskCounter++
-		taskID := fmt.Sprintf("task-%d", taskCounter)
-		mu.Unlock()
+        // Asignación a la variable global declarada arriba
+        colaTareasGlobal = payload
 
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"id":     taskID,
-			"status": "pending",
-		})
-		log.Printf("📥 Tarea de auditoría recibida: %s (Total archivos: %d, Inicio: %d)\n", taskID, len(payload.ListaArchivos), payload.IndiceInicio)
+        mu.Lock()
+        taskCounter++
+        taskID := fmt.Sprintf("task-%d", taskCounter)
+        mu.Unlock()
 
-		// ☁️ Ejecución en segundo plano en la nube de Render
-		go ejecutarAuditoriaEnNube(taskID, payload)
-		return
-	}
+        w.WriteHeader(http.StatusCreated)
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "id":      taskID,
+            "status":  "pending",
+            "mensaje": "Tareas recibidas en la nube",
+        })
+        
+        log.Printf("📥 [RENDER COORDINATOR]: Tarea de auditoría recibida: %s (ID Padre: %s, Total archivos: %d, Inicio: %d)\n", taskID, payload.IDPadre, len(payload.ListaArchivos), payload.IndiceInicio)
 
-	mu.Lock()
-	defer mu.Unlock()
-	list := make([]map[string]interface{}, 0, len(tasks))
-	for _, t := range tasks {
-		list = append(list, map[string]interface{}{
-			"id":     t.ID,
-			"status": t.Status,
-			"result": t.Result,
-		})
-	}
-	json.NewEncoder(w).Encode(list)
+        // ☁️ Ejecución en segundo plano en la nube de Render
+        go ejecutarAuditoriaEnNube(taskID, payload)
+        return
+    }
+
+    mu.Lock()
+    defer mu.Unlock()
+    list := make([]map[string]interface{}, 0, len(tasks))
+    for _, t := range tasks {
+        list = append(list, map[string]interface{}{
+            "id":     t.ID,
+            "status": t.Status,
+            "result": t.Result,
+        })
+    }
+    json.NewEncoder(w).Encode(list)
 }
 
 func enviarSintesisAOllamaRemoto(taskID string, nombreArchivo string, hallazgosConsolidados string, totalChunks int) (string, error) {
