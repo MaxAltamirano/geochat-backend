@@ -143,13 +143,17 @@ func HandleObtenerCheckpointBuzon(w http.ResponseWriter, r *http.Request) {
     hayCheckpointPendiente = false // Se consume y se limpia el buzón
 }
 
-type TaskPayload struct {
-    IDPadre       string   `json:"id_padre"`
-    ListaArchivos []string `json:"lista_archivos"`
-    IndiceInicio  int      `json:"indice_inicio"`
-    Total         int      `json:"total"`
+type ArchivoFisicoPayload struct {
+    Ruta      string `json:"ruta"`
+    Contenido string `json:"contenido"`
 }
 
+type TaskPayload struct {
+    IDPadre         string                 `json:"id_proceso"`
+    ArchivosFisicos []ArchivoFisicoPayload `json:"archivos_fisicos"` // 👈 Coincide exactamente con el JSON enviado
+    IndiceInicio    int                    `json:"indice_inicio"`
+    Total           int                    `json:"total"`
+}
 // 📦 Declaración global a nivel de paquete (fuera de cualquier función)
 var colaTareasGlobal TaskPayload
 
@@ -178,8 +182,7 @@ func handleTasks(w http.ResponseWriter, r *http.Request) {
             "mensaje": "Tareas recibidas en la nube",
         })
         
-        log.Printf("📥 [RENDER COORDINATOR]: Tarea de auditoría recibida: %s (ID Padre: %s, Total archivos: %d, Inicio: %d)\n", taskID, payload.IDPadre, len(payload.ListaArchivos), payload.IndiceInicio)
-
+        log.Printf("📥 [RENDER COORDINATOR]: Tarea de auditoría recibida: %s (ID Padre: %s, Total archivos: %d, Inicio: %d)\n", taskID, payload.IDPadre, len(payload.ArchivosFisicos), payload.IndiceInicio)
         // ☁️ Ejecución en segundo plano en la nube de Render
         go ejecutarAuditoriaEnNube(taskID, payload)
         return
@@ -288,148 +291,141 @@ func ArchivarAuditoriaGlobalRemoto(idSesion string, documentos []DocumentacionAn
 }
 
 func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
-	total := len(payload.ListaArchivos)
-	if total == 0 {
-		log.Println("⚠️ [RENDER]: La lista de archivos está vacía.")
-		return
-	}
+    total := len(payload.ArchivosFisicos)
+    if total == 0 {
+        log.Println("⚠️ [RENDER]: La lista de archivos físicos está vacía.")
+        return
+    }
 
-	var documentosAuditados []DocumentacionAnalisis
+    var documentosAuditados []DocumentacionAnalisis
 
-	for i := payload.IndiceInicio; i < total; i++ {
-		currentFilePath := payload.ListaArchivos[i]
+    for i := payload.IndiceInicio; i < total; i++ {
+        archivoActual := payload.ArchivosFisicos[i]
+        currentFilePath := archivoActual.Ruta
+        contenidoCodigo := archivoActual.Contenido
 
-		log.Printf("🔄 [☁️ RENDER - AUDITORÍA]: Iniciando chunking y auditoría profunda del archivo (%d/%d): %s\n", i+1, total, currentFilePath)
+        log.Printf("🔄 [☁️ RENDER - AUDITORÍA]: Iniciando chunking y auditoría profunda del archivo (%d/%d): %s\n", i+1, total, currentFilePath)
 
-		// 1️⃣ LEEMOS EL CÓDIGO REAL DEL ARCHIVO
-		contenidoBytes, errRead := os.ReadFile(currentFilePath)
-		if errRead != nil {
-			log.Printf("❌ [RENDER]: Error leyendo %s para chunks: %v\n", currentFilePath, errRead)
-			continue
-		}
-		contenidoCodigo := string(contenidoBytes)
+        // 2️⃣ Partimos el código real en líneas (bloques de 40 para aliviar al modelo)
+        lineas := strings.Split(contenidoCodigo, "\n")
+        tamanoChunk := 40
+        var hallazgosConsolidados strings.Builder
 
-		// 2️⃣ Partimos el código real en líneas (bloques de 40 para aliviar al modelo)
-		lineas := strings.Split(contenidoCodigo, "\n")
-		tamanoChunk := 40
-		var hallazgosConsolidados strings.Builder
+        totalChunks := (len(lineas) + tamanoChunk - 1) / tamanoChunk
+        if totalChunks == 0 {
+            totalChunks = 1
+        }
 
-		totalChunks := (len(lineas) + tamanoChunk - 1) / tamanoChunk
-		if totalChunks == 0 {
-			totalChunks = 1
-		}
+        hallazgosConsolidados.WriteString(fmt.Sprintf("=== REPORTE DE HALLAZGOS PARCIALES (RENDER): %s ===\n", currentFilePath))
 
-		hallazgosConsolidados.WriteString(fmt.Sprintf("=== REPORTE DE HALLAZGOS PARCIALES (RENDER): %s ===\n", currentFilePath))
+        exitoTotal := true
+        tiempoInicioTotal := time.Now()
+        var pesoTotalBytes int64 = 0
 
-		exitoTotal := true
-		tiempoInicioTotal := time.Now()
-		var pesoTotalBytes int64 = 0
+        for j := 0; j < len(lineas); j += tamanoChunk {
+            fin := j + tamanoChunk
+            if fin > len(lineas) {
+                fin = len(lineas)
+            }
 
-		for j := 0; j < len(lineas); j += tamanoChunk {
-			fin := j + tamanoChunk
-			if fin > len(lineas) {
-				fin = len(lineas)
-			}
+            // 3️⃣ CORTAMOS EL CHUNK DE CÓDIGO Y SE LO MANDAMOS A LA IA EN LA NUBE
+            chunkCodigo := strings.Join(lineas[j:fin], "\n")
+            numParte := (j / tamanoChunk) + 1
 
-			// 3️⃣ CORTAMOS EL CHUNK DE CÓDIGO Y SE LO MANDAMOS A LA IA EN LA NUBE
-			chunkCodigo := strings.Join(lineas[j:fin], "\n")
-			numParte := (j / tamanoChunk) + 1
+            pesoTotalBytes += int64(len(chunkCodigo))
 
-			pesoTotalBytes += int64(len(chunkCodigo))
+            log.Printf("[🔵 AUDITORÍA]: Procesando parte %d de %d del archivo %s...\n", numParte, totalChunks, currentFilePath)
 
-			log.Printf("[🔵 AUDITORÍA]: Procesando parte %d de %d del archivo %s...\n", numParte, totalChunks, currentFilePath)
+            // 🛡️ Mecanismo de reintento inteligente ante cortes abruptos
+            var respuestaChunk string
+            var errOllama error
+            maxIntentos := 2
 
-			// 🛡️ Mecanismo de reintento inteligente ante cortes abruptos
-			var respuestaChunk string
-			var errOllama error
-			maxIntentos := 2
+            for intento := 1; intento <= maxIntentos; intento++ {
+                respuestaChunk, errOllama = enviarAOllamaRemoto(taskID, chunkCodigo)
+                if errOllama == nil {
+                    break
+                }
+                log.Printf("⚠️ [AVISO IA RENDER]: Reintentando parte %d/%d (Intento %d/%d)...\n", numParte, totalChunks, intento, maxIntentos)
+                time.Sleep(1 * time.Second)
+            }
 
-			for intento := 1; intento <= maxIntentos; intento++ {
-				respuestaChunk, errOllama = enviarAOllamaRemoto(taskID, chunkCodigo)
-				if errOllama == nil {
-					break
-				}
-				log.Printf("⚠️ [AVISO IA RENDER]: Reintentando parte %d/%d (Intento %d/%d)...\n", numParte, totalChunks, intento, maxIntentos)
-				time.Sleep(1 * time.Second)
-			}
+            if errOllama != nil {
+                log.Printf("❌ [ERROR IA RENDER CRÍTICO]: Falló definitivamente la parte %d/%d: %v\n", numParte, totalChunks, errOllama)
+                exitoTotal = false
+                break
+            }
 
-			if errOllama != nil {
-				log.Printf("❌ [ERROR IA RENDER CRÍTICO]: Falló definitivamente la parte %d/%d: %v\n", numParte, totalChunks, errOllama)
-				exitoTotal = false
-				break
-			}
+            hallazgosConsolidados.WriteString(fmt.Sprintf("\n[BLOQUE %d / %d]\n%s\n----------------------------------------\n",
+                numParte,
+                totalChunks,
+                respuestaChunk,
+            ))
+        }
 
-			hallazgosConsolidados.WriteString(fmt.Sprintf("\n[BLOQUE %d / %d]\n%s\n----------------------------------------\n",
-				numParte,
-				totalChunks,
-				respuestaChunk,
-			))
-		}
+        tiempoTotalProceso := time.Since(tiempoInicioTotal)
 
-		tiempoTotalProceso := time.Since(tiempoInicioTotal)
+        // Verificación y ejecución del paso de Síntesis Global
+        if !exitoTotal || hallazgosConsolidados.Len() == 0 {
+            log.Printf("⚠️ [ADVERTENCIA RENDER]: La auditoría por chunks se interrumpió en %s\n", currentFilePath)
+            documentosAuditados = append(documentosAuditados, DocumentacionAnalisis{
+                FilePath:          currentFilePath,
+                NombreArchivo:     currentFilePath,
+                Estado:            "ERROR_SINTESIS",
+                ContenidoOriginal: hallazgosConsolidados.String(),
+                ResumenCambios:    "⚠️ Auditoría incompleta por corte en fragmentos de IA en Render.",
+                Timestamp:         time.Now(),
+            })
+        } else {
+            log.Println("[🔵 AUDITORÍA]:- SÍNTESIS GLOBAL]: Alimentando al modelo con las respuestas parciales para obtener el veredicto final...")
 
-		// Verificación y ejecución del paso de Síntesis Global
-		if !exitoTotal || hallazgosConsolidados.Len() == 0 {
-			log.Printf("⚠️ [ADVERTENCIA RENDER]: La auditoría por chunks se interrumpió en %s\n", currentFilePath)
-			documentosAuditados = append(documentosAuditados, DocumentacionAnalisis{
-				FilePath:          currentFilePath,
-				NombreArchivo:     currentFilePath,
-				Estado:            "ERROR_SINTESIS",
-				ContenidoOriginal: hallazgosConsolidados.String(),
-				ResumenCambios:    "⚠️ Auditoría incompleta por corte en fragmentos de IA en Render.",
-				Timestamp:         time.Now(),
-			})
-		} else {
-			log.Println("[🔵 AUDITORÍA]:- SÍNTESIS GLOBAL]: Alimentando al modelo con las respuestas parciales para obtener el veredicto final...")
+            dictamenFinal, errSintesis := enviarSintesisAOllamaRemoto(
+                taskID,
+                currentFilePath,
+                hallazgosConsolidados.String(),
+                totalChunks,
+            )
 
-			dictamenFinal, errSintesis := enviarSintesisAOllamaRemoto(
-				taskID,
-				currentFilePath,
-				hallazgosConsolidados.String(),
-				totalChunks,
-			)
+            if errSintesis != nil {
+                log.Printf("⚠️ [RENDER - ERROR SÍNTESIS]: No se pudo consolidar la síntesis final: %v\n", errSintesis)
+                documentosAuditados = append(documentosAuditados, DocumentacionAnalisis{
+                    FilePath:          currentFilePath,
+                    NombreArchivo:     currentFilePath,
+                    Estado:            "ERROR_SINTESIS",
+                    ContenidoOriginal: hallazgosConsolidados.String(),
+                    ResumenCambios:    hallazgosConsolidados.String(),
+                    Timestamp:         time.Now(),
+                })
+            } else {
+                log.Println("[🔵 AUDITORÍA]:☁️ - ✅ [RENDER - ÉXITO TOTAL]: Síntesis global completada en la nube.")
 
-			if errSintesis != nil {
-				log.Printf("⚠️ [RENDER - ERROR SÍNTESIS]: No se pudo consolidar la síntesis final: %v\n", errSintesis)
-				documentosAuditados = append(documentosAuditados, DocumentacionAnalisis{
-					FilePath:          currentFilePath,
-					NombreArchivo:     currentFilePath,
-					Estado:            "ERROR_SINTESIS",
-					ContenidoOriginal: hallazgosConsolidados.String(),
-					ResumenCambios:    hallazgosConsolidados.String(),
-					Timestamp:         time.Now(),
-				})
-			} else {
-				log.Println("[🔵 AUDITORÍA]:☁️ - ✅ [RENDER - ÉXITO TOTAL]: Síntesis global completada en la nube.")
+                nuevoDoc := DocumentacionAnalisis{
+                    FilePath:             currentFilePath,
+                    NombreArchivo:        currentFilePath,
+                    Estado:               "AUDITADO_CON_IA",
+                    ContenidoOriginal:    hallazgosConsolidados.String(),
+                    ResumenCambios:       dictamenFinal,
+                    TiempoProcesamiento:  tiempoTotalProceso.String(),
+                    PesoAuditado:         fmt.Sprintf("%d bytes", pesoTotalBytes),
+                    Timestamp:            time.Now(),
+                    TieneRecomendaciones: true,
+                }
+                documentosAuditados = append(documentosAuditados, nuevoDoc)
+            }
+        }
 
-				nuevoDoc := DocumentacionAnalisis{
-					FilePath:             currentFilePath,
-					NombreArchivo:        currentFilePath,
-					Estado:               "AUDITADO_CON_IA",
-					ContenidoOriginal:    hallazgosConsolidados.String(),
-					ResumenCambios:       dictamenFinal,
-					TiempoProcesamiento:  tiempoTotalProceso.String(),
-					PesoAuditado:         fmt.Sprintf("%d bytes", pesoTotalBytes),
-					Timestamp:            time.Now(),
-					TieneRecomendaciones: true,
-				}
-				documentosAuditados = append(documentosAuditados, nuevoDoc)
-			}
-		}
+        //💾 Guardado global y actualización del checkpoint local/remoto
+        errGlobal := ArchivarAuditoriaGlobalRemoto(payload.IDPadre, documentosAuditados)
+        if errGlobal != nil {
+            log.Printf("❌ [RENDER]: Error al archivar auditoría global: %v\n", errGlobal)
+        }
 
-		//💾 Guardado global y actualización del checkpoint local/remoto
-		errGlobal := ArchivarAuditoriaGlobalRemoto(payload.IDPadre, documentosAuditados)
-		if errGlobal != nil {
-			log.Printf("❌ [RENDER]: Error al archivar auditoría global: %v\n", errGlobal)
-		}
+        actualizarCheckpointProgreso(payload.IDPadre, total, i+1, currentFilePath, "AUDITANDO")
+    }
 
-		actualizarCheckpointProgreso(payload.IDPadre, total, i+1, currentFilePath, "AUDITANDO")
-	}
-
-	actualizarCheckpointProgreso(payload.IDPadre, total, total, "", "COMPLETADO")
-	log.Printf("✨ [RENDER]: Tarea %s completada al 100%% en la nube.\n", taskID)
+    actualizarCheckpointProgreso(payload.IDPadre, total, total, "", "COMPLETADO")
+    log.Printf("✨ [RENDER]: Tarea %s completada al 100%% en la nube.\n", taskID)
 }
-
 func enviarAOllamaRemoto(taskID string, chunkCodigo string) (string, error) {
     pesoBytes := int64(len(chunkCodigo))
 
