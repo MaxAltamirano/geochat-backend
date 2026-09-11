@@ -433,8 +433,15 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
     actualizarCheckpointProgreso(payload.IDPadre, total, total, "", "COMPLETADO")
     log.Printf("✨ [RENDER]: Tarea %s completada al 100%% en la nube.\n", taskID)
 }
+
 func enviarAOllamaRemoto(taskID string, chunkCodigo string) (string, error) {
     pesoBytes := int64(len(chunkCodigo))
+
+    // 0️⃣ Limpiamos cualquier residuo previo en el buzón de resultados antes de mandar el nuevo chunk
+    muBuzonResultados.Lock()
+    hayResultadoPendiente = false
+    ultimaTaskEntrada = Task{}
+    muBuzonResultados.Unlock()
 
     // 1️⃣ DEPOSITAMOS EL CHUNK EN EL BUZÓN DE SALIDA DE RENDER
     muBuzonSync.Lock()
@@ -461,13 +468,15 @@ func enviarAOllamaRemoto(taskID string, chunkCodigo string) (string, error) {
         select {
         case <-timeout:
             return "", fmt.Errorf("timeout: la Linux local no devolvió el resultado del chunk a tiempo")
-     case <-ticker.C:
+        case <-ticker.C:
             muBuzonResultados.Lock()
             if hayResultadoPendiente {
-                // Aceptamos el resultado disponible en el buzón de manera directa para liberar la espera
+                // Aceptamos el resultado disponible en el buzón de manera directa
                 resultadoLocal := ultimaTaskEntrada.Result
                 
+                // Reseteamos inmediatamente para el siguiente chunk
                 hayResultadoPendiente = false
+                ultimaTaskEntrada = Task{}
                 muBuzonResultados.Unlock()
 
                 log.Printf("✨ [RENDER - BUZÓN]: ¡Respuesta del chunk rescatada del buzón con éxito!\n")
