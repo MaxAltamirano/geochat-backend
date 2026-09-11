@@ -334,8 +334,11 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
 
             pesoTotalBytes += int64(len(chunkCodigo))
 
+            // 🔍 LOG 1: Sabiendo exactamente qué chunk sale y su tamaño
+            log.Printf("📡 [RENDER -> OLLAMA]: Enviando parte %d/%d de '%s' (Tamaño: %d bytes)...", numParte, totalChunks, currentFilePath, len(chunkCodigo))
             log.Printf("[🔵 AUDITORÍA]: Procesando parte %d de %d del archivo %s...\n", numParte, totalChunks, currentFilePath)
-
+            tiempoInicioChunk := time.Now()
+            
             // 🛡️ Mecanismo de reintento inteligente ante cortes abruptos
             var respuestaChunk string
             var errOllama error
@@ -355,6 +358,10 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
                 exitoTotal = false
                 break
             }
+
+            // 🔍 LOG 2: Confirmando que la IA respondió este chunk específico y cuánto demoró
+            log.Printf("✅ [OLLAMA -> RENDER]: Parte %d/%d completada en %v (Recibidos: %d caracteres)\n", 
+                numParte, totalChunks, time.Since(tiempoInicioChunk), len(respuestaChunk))
 
             hallazgosConsolidados.WriteString(fmt.Sprintf("\n[BLOQUE %d / %d]\n%s\n----------------------------------------\n",
                 numParte,
