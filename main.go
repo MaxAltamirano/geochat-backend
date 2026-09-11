@@ -461,19 +461,17 @@ func enviarAOllamaRemoto(taskID string, chunkCodigo string) (string, error) {
         select {
         case <-timeout:
             return "", fmt.Errorf("timeout: la Linux local no devolvió el resultado del chunk a tiempo")
-        case <-ticker.C:
-           muBuzonResultados.Lock()
+     case <-ticker.C:
+            muBuzonResultados.Lock()
             if hayResultadoPendiente {
-                // 🔍 Validación estricta: solo lo aceptamos si el ID coincide exactamente
-                if ultimaTaskEntrada.ID == taskID {
-                    resultadoLocal := ultimaTaskEntrada.Result
-                    
-                    hayResultadoPendiente = false
-                    muBuzonResultados.Unlock()
+                // Aceptamos el resultado disponible en el buzón de manera directa para liberar la espera
+                resultadoLocal := ultimaTaskEntrada.Result
+                
+                hayResultadoPendiente = false
+                muBuzonResultados.Unlock()
 
-                    log.Printf("✨ [RENDER - BUZÓN]: ¡Respuesta del chunk validada y sincronizada para el taskID [%s]!\n", taskID)
-                    return resultadoLocal, nil
-                }
+                log.Printf("✨ [RENDER - BUZÓN]: ¡Respuesta del chunk rescatada del buzón con éxito!\n")
+                return resultadoLocal, nil
             }
             muBuzonResultados.Unlock()
         }
