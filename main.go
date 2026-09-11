@@ -502,32 +502,41 @@ func handlePostTaskResult(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    var res Task
-    if err := json.NewDecoder(r.Body).Decode(&res); err != nil {
+    // 1️⃣ Estructura exacta que mandás desde la Linux local
+    var payloadRetorno struct {
+        TaskID    string `json:"task_id"`
+        Archivo   string `json:"archivo"`
+        Resultado string `json:"resultado"`
+    }
+
+    if err := json.NewDecoder(r.Body).Decode(&payloadRetorno); err != nil {
+        log.Printf("❌ [ERROR DECODIFICACIÓN RETORNO]: %v\n", err)
         http.Error(w, err.Error(), http.StatusBadRequest)
         return
     }
-    res.Timestamp = time.Now()
 
-    // 1️⃣ Actualizamos el mapa general de tareas (tu lógica original)
+    // 2️⃣ Actualizamos el mapa general de tareas usando el TaskID recibido
     mu.Lock()
-    if t, exists := tasks[res.ID]; exists {
+    if t, exists := tasks[payloadRetorno.TaskID]; exists {
         t.Status = "completed"
-        t.Result = res.Result
-        tasks[res.ID] = t
+        t.Result = payloadRetorno.Resultado
+        tasks[payloadRetorno.TaskID] = t
     } else {
-        // Opcional por si entra directo al buzón sin pasar por el mapa clásico
-        log.Printf("⚠️ [AVISO TAREA]: La tarea ID [%s] llegó al resultado pero no estaba en el mapa de tasks.\n", res.ID)
+        log.Printf("⚠️ [AVISO TAREA]: La tarea ID [%s] llegó al resultado pero no estaba en el mapa de tasks.\n", payloadRetorno.TaskID)
     }
     mu.Unlock()
 
-    // 2️⃣ Alimentamos el buzón de entrada para que el polling de enviarAOllamaRemoto lo despierte al instante
+    // 3️⃣ Alimentamos el buzón de resultados para despertar al hilo en espera
     muBuzonResultados.Lock()
-    ultimaTaskEntrada = res
+    ultimaTaskEntrada = Task{
+        ID:     payloadRetorno.TaskID,
+        Status: "completed",
+        Result: payloadRetorno.Resultado,
+    }
     hayResultadoPendiente = true
     muBuzonResultados.Unlock()
 
-    log.Printf("📥 [RENDER - BUZÓN ENTRADA]: Resultado sincronizado y registrado para la tarea ID [%s]\n", res.ID)
+    log.Printf("📥 [RENDER - BUZÓN ENTRADA]: Resultado sincronizado y registrado para la tarea ID [%s] (Archivo: %s)\n", payloadRetorno.TaskID, payloadRetorno.Archivo)
 
     w.WriteHeader(http.StatusOK)
     io.WriteString(w, `{"status":"success"}`)
