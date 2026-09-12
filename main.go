@@ -94,6 +94,8 @@ var (
     muBuzonResultados     sync.Mutex
     ultimaTaskEntrada     Task
     hayResultadoPendiente bool
+    muAuditoria        sync.Mutex
+    ultimoPaqueteListo []byte
 )
 
 // Función en Render que actualiza el estado y lo deja disponible en el buzón de la nube
@@ -437,11 +439,10 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
 func enviarAOllamaRemoto(taskID string, chunkCodigo string) (string, error) {
     pesoBytes := int64(len(chunkCodigo))
 
-    // 0️⃣ Limpiamos cualquier residuo previo en el buzón de resultados antes de mandar el nuevo chunk
-    muBuzonResultados.Lock()
-    hayResultadoPendiente = false
-    ultimaTaskEntrada = Task{}
-    muBuzonResultados.Unlock()
+    // 0️⃣ Limpiamos cualquier residuo previo en el buzón usando el candado y las variables correctas
+    muAuditoria.Lock()
+    ultimoPaqueteListo = nil
+    muAuditoria.Unlock()
 
     // 1️⃣ DEPOSITAMOS EL CHUNK EN EL BUZÓN DE SALIDA DE RENDER
     muBuzonSync.Lock()
@@ -459,7 +460,6 @@ func enviarAOllamaRemoto(taskID string, chunkCodigo string) (string, error) {
     log.Printf("☁️ [RENDER - BUZÓN PULL]: Chunk enviado al buzón. Esperando que la Linux local lo procese y devuelva...\n")
 
     // 2️⃣ BUCLE DE ESPERA INTELIGENTE (POLLING) HASTA QUE EL WORKER LOCAL DEVUELVA EL RESULTADO
-    // Espera hasta 15 minutos de margen para que Ollama local procese bloques grandes
     timeout := time.After(900 * time.Second)
     ticker := time.NewTicker(2 * time.Second)
     defer ticker.Stop()
@@ -469,20 +469,19 @@ func enviarAOllamaRemoto(taskID string, chunkCodigo string) (string, error) {
         case <-timeout:
             return "", fmt.Errorf("timeout: la Linux local no devolvió el resultado del chunk a tiempo")
         case <-ticker.C:
-            muBuzonResultados.Lock()
-            if hayResultadoPendiente {
-                // Aceptamos el resultado disponible en el buzón de manera directa
-                resultadoLocal := ultimaTaskEntrada.Result
+            muAuditoria.Lock()
+            if len(ultimoPaqueteListo) > 0 {
+                // Aceptamos el paquete crudo que guardó el handler HTTP
+                resultadoLocal := string(ultimoPaqueteListo)
                 
                 // Reseteamos inmediatamente para el siguiente chunk
-                hayResultadoPendiente = false
-                ultimaTaskEntrada = Task{}
-                muBuzonResultados.Unlock()
+                ultimoPaqueteListo = nil
+                muAuditoria.Unlock()
 
                 log.Printf("✨ [RENDER - BUZÓN]: ¡Respuesta del chunk rescatada del buzón con éxito!\n")
                 return resultadoLocal, nil
             }
-            muBuzonResultados.Unlock()
+            muAuditoria.Unlock()
         }
     }
 }
