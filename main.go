@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+    "bytes"
 )
 
 type DocumentacionAnalisis struct {
@@ -94,8 +95,8 @@ var (
     muBuzonResultados     sync.Mutex
     ultimaTaskEntrada     Task
     hayResultadoPendiente bool
-    muAuditoria        sync.Mutex
-    ultimoPaqueteListo []byte
+    //muAuditoria        sync.Mutex
+    //ultimoPaqueteListo []byte
 )
 
 // Función en Render que actualiza el estado y lo deja disponible en el buzón de la nube
@@ -439,14 +440,7 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
 func enviarAOllamaRemoto(taskID string, chunkCodigo string) (string, error) {
     pesoBytes := int64(len(chunkCodigo))
 
-    // 0️⃣ Limpiamos cualquier residuo previo en el buzón usando el candado y las variables correctas
-    muAuditoria.Lock()
-    ultimoPaqueteListo = nil
-    muAuditoria.Unlock()
-
-    // 1️⃣ DEPOSITAMOS EL CHUNK EN EL BUZÓN DE SALIDA DE RENDER
-    muBuzonSync.Lock()
-    ultimoCheckpointEnviado = MensajeCheckpointBuzon{
+    payload := MensajeCheckpointBuzon{
         TipoAccion:         "AUDITAR_CHUNK",
         IDPadre:            taskID,
         ContenidoCodigo:    chunkCodigo,
@@ -454,12 +448,36 @@ func enviarAOllamaRemoto(taskID string, chunkCodigo string) (string, error) {
         TimestampInyeccion: time.Now(),
         Timestamp:          time.Now(),
     }
-    hayCheckpointPendiente = true
-    muBuzonSync.Unlock()
 
-    log.Printf("☁️ [RENDER - BUZÓN PULL]: Chunk enviado al buzón. Esperando que la Linux local lo procese y devuelva...\n")
+    bodyBytes, err := json.Marshal(payload)
+    if err != nil {
+        return "", err
+    }
 
-    // 2️⃣ BUCLE DE ESPERA INTELIGENTE (POLLING) HASTA QUE EL WORKER LOCAL DEVUELVA EL RESULTADO
+    // 1️⃣ Envíamos el chunk por HTTP POST al Córtex Buzón en Render para que el worker local lo tome
+    urlBuzon := "https://geochat-buzon.onrender.com/api/auditoria/depositar-chunk"
+    req, err := http.NewRequest("POST", urlBuzon, bytes.NewBuffer(bodyBytes))
+    if err != nil {
+        return "", err
+    }
+    req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("X-Soberano-Key", "Yo.Soy.Riqueza.Incalculable.Yo.Soy.Abundancia.Total")
+
+    client := &http.Client{Timeout: 15 * time.Second}
+    resp, err := client.Do(req)
+    if err != nil {
+        return "", fmt.Errorf("error de red contactando al buzón en Render: %v", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        cuerpoError, _ := io.ReadAll(resp.Body)
+        return "", fmt.Errorf("el buzón rechazó el chunk (HTTP %d): %s", resp.StatusCode, string(cuerpoError))
+    }
+
+    log.Printf("------------>>☁️ [RENDER BACKEND -> BUZÓN]: Chunk depositado en la nube con éxito. Esperando respuesta de la Linux local...\n")
+
+    // 2️⃣ BUCLE DE POLLING: Esperamos a que la Linux local procese y devuelva el resultado por el endpoint de resultados
     timeout := time.After(900 * time.Second)
     ticker := time.NewTicker(2 * time.Second)
     defer ticker.Stop()
@@ -469,19 +487,36 @@ func enviarAOllamaRemoto(taskID string, chunkCodigo string) (string, error) {
         case <-timeout:
             return "", fmt.Errorf("timeout: la Linux local no devolvió el resultado del chunk a tiempo")
         case <-ticker.C:
-            muAuditoria.Lock()
-            if len(ultimoPaqueteListo) > 0 {
-                // Aceptamos el paquete crudo que guardó el handler HTTP
-                resultadoLocal := string(ultimoPaqueteListo)
-                
-                // Reseteamos inmediatamente para el siguiente chunk
-                ultimoPaqueteListo = nil
-                muAuditoria.Unlock()
+            // Consultamos al buzón si ya hay un resultado listo de la Linux local
+            reqCheck, err := http.NewRequest("GET", "https://geochat-buzon.onrender.com/api/auditoria/consultar-resultado-local", nil)
+            if err != nil {
+                continue
+            }
+            reqCheck.Header.Set("X-Soberano-Key", "Yo.Soy.Riqueza.Incalculable.Yo.Soy.Abundancia.Total")
+
+            respCheck, err := client.Do(reqCheck)
+            if err != nil {
+                continue
+            }
+            
+            cuerpoCheck, err := io.ReadAll(respCheck.Body)
+            respCheck.Body.Close()
+            if err != nil {
+                continue
+            }
+
+            if respCheck.StatusCode == http.StatusOK && len(cuerpoCheck) > 0 {
+                // Verificamos si no es el mensaje de espera en vacío
+                var raw map[string]interface{}
+                if json.Unmarshal(cuerpoCheck, &raw) == nil {
+                    if status, ok := raw["status"].(string); ok && status == "sin_resultados_pendientes" {
+                        continue
+                    }
+                }
 
                 log.Printf("✨ [RENDER - BUZÓN]: ¡Respuesta del chunk rescatada del buzón con éxito!\n")
-                return resultadoLocal, nil
+                return string(cuerpoCheck), nil
             }
-            muAuditoria.Unlock()
         }
     }
 }
