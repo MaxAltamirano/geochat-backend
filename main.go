@@ -115,19 +115,27 @@ func actualizarCheckpointProgreso(idPadre string, total int, procesados int, ult
         }
     }
 
+    // Extraemos limpiamente el nombre del archivo desde ultimoAuditado 
+    // (ej: si viene "app.go (Iniciando...)" o "app.go [Parte 1/2]", nos quedamos solo con la ruta antes del primer espacio)
+    filePathPuro := ultimoAuditado
+    if idx := strings.Index(ultimoAuditado, " "); idx != -1 {
+        filePathPuro = ultimoAuditado[:idx]
+    }
+
     ultimoCheckpointEnviado = MensajeCheckpointBuzon{
-		TipoAccion:     "CHECKPOINT", // 👈 Acá le avisas explícitamente al worker que esto es un checkpoint
+        TipoAccion:     "CHECKPOINT",
         IDPadre:        idPadre,
         Total:          total,
         Procesados:     procesados,
+        FilePath:       filePathPuro, // 👈 Se inyecta limpio automáticamente aquí
         UltimoAuditado: ultimoAuditado,
         EstadoForzado:  estadoGlobalCalculado,
         Timestamp:      time.Now(),
     }
     hayCheckpointPendiente = true
 
-    log.Printf("☁️ [RENDER - BUZÓN SYNC]: Checkpoint empaquetado para el Worker local -> Procesados: %d/%d | Estado: %s\n",
-        procesados, total, estadoGlobalCalculado)
+    log.Printf("☁️ [RENDER - BUZÓN SYNC]: Checkpoint empaquetado -> Archivo: %s | Procesados: %d/%d\n",
+        filePathPuro, procesados, total)
 }
 
 // Handler HTTP en Render expuesto en la ruta /api/auditoria/checkpoint-status que consulta el Worker local
