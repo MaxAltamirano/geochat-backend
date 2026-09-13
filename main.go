@@ -131,6 +131,7 @@ func actualizarCheckpointProgreso(idPadre string, total int, procesados int, ult
 }
 
 // Handler HTTP en Render expuesto en la ruta /api/auditoria/checkpoint-status que consulta el Worker local
+
 func HandleObtenerCheckpointBuzon(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
 
@@ -142,8 +143,8 @@ func HandleObtenerCheckpointBuzon(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // Devolvemos el estado actual de forma persistente para que el frontend lo lea con fluidez
     json.NewEncoder(w).Encode(ultimoCheckpointEnviado)
-    hayCheckpointPendiente = false // Se consume y se limpia el buzón
 }
 
 type ArchivoFisicoPayload struct {
@@ -309,6 +310,15 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
 
         log.Printf("🔄 [☁️ RENDER - AUDITORÍA]: Iniciando chunking y auditoría profunda del archivo (%d/%d): %s\n", i+1, total, currentFilePath)
 
+        // 1️⃣ Notificar inicio de archivo en el buzón de inmediato
+        actualizarCheckpointProgreso(
+            payload.IDPadre, 
+            total, 
+            i, 
+            fmt.Sprintf("%s (Iniciando...)", currentFilePath), 
+            "AUDITANDO",
+        )
+
         // 2️⃣ Partimos el código real en líneas (bloques de 40 para aliviar al modelo)
         lineas := strings.Split(contenidoCodigo, "\n")
         tamanoChunk := 40
@@ -336,6 +346,15 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
             numParte := (j / tamanoChunk) + 1
 
             pesoTotalBytes += int64(len(chunkCodigo))
+
+            // 🚀 NOTIFICAR AL BUZÓN EN TIEMPO REAL POR CADA CHUNK
+            actualizarCheckpointProgreso(
+                payload.IDPadre, 
+                total, 
+                i, 
+                fmt.Sprintf("%s [Parte %d/%d]", currentFilePath, numParte, totalChunks), 
+                "AUDITANDO",
+            )
 
             // 🔍 LOG 1: Sabiendo exactamente qué chunk sale y su tamaño
             log.Printf("📡 [RENDER -> OLLAMA]: Enviando parte %d/%d de '%s' (Tamaño: %d bytes)...", numParte, totalChunks, currentFilePath, len(chunkCodigo))
@@ -389,6 +408,15 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
         } else {
             log.Println("[🔵 AUDITORÍA]:- SÍNTESIS GLOBAL]: Alimentando al modelo con las respuestas parciales para obtener el veredicto final...")
 
+            // Notificando fase de síntesis final en el buzón
+            actualizarCheckpointProgreso(
+                payload.IDPadre, 
+                total, 
+                i, 
+                fmt.Sprintf("%s (Consolidando Síntesis...)", currentFilePath), 
+                "AUDITANDO",
+            )
+
             dictamenFinal, errSintesis := enviarSintesisAOllamaRemoto(
                 taskID,
                 currentFilePath,
@@ -424,7 +452,7 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
             }
         }
 
-        //💾 Guardado global y actualización del checkpoint local/remoto
+        // 💾 Guardado global y actualización del checkpoint con el archivo completado (i+1)
         errGlobal := ArchivarAuditoriaGlobalRemoto(payload.IDPadre, documentosAuditados)
         if errGlobal != nil {
             log.Printf("❌ [RENDER]: Error al archivar auditoría global: %v\n", errGlobal)
