@@ -279,11 +279,18 @@ func ArchivarAuditoriaGlobalRemoto(idSesion string, documentos []DocumentacionAn
     muBuzonSync.Lock()
     defer muBuzonSync.Unlock()
 
+    // Extraemos de forma segura el FilePath del primer documento si existe
+    var pathArchivo string
+    if len(documentos) > 0 {
+        pathArchivo = documentos[0].FilePath
+    }
+
     // Empaquetamos la acción para que el worker local la retire en su próximo Pull/Ticker
     ultimoCheckpointEnviado = MensajeCheckpointBuzon{
-        TipoAccion:  "ARCHIVAR_GLOBAL", // 👈 El tipo de acción que atrapará el case en tu worker local
+        TipoAccion:  "ARCHIVAR_GLOBAL",
         IDPadre:     idSesion,
-        Documentos:  documentos,        // Asegurate de que tu struct MensajeCheckpointBuzon tenga este campo
+        FilePath:    pathArchivo, // 👈 Usamos el path extraído del documento
+        Documentos:  documentos,        
         Timestamp:   time.Now(),
     }
     hayCheckpointPendiente = true
