@@ -60,6 +60,15 @@ type MensajeCheckpointBuzon struct {
 	Documentos           []DocumentacionAnalisis   `json:"documentos,omitempty"`
 }
 
+// MensajeDireccionadoCheckpoint representa el paquete enviado desde Render
+type MensajeDireccionadoCheckpoint struct {
+	TipoAccion         string                 `json:"tipo_accion"`          // Ej: "MUTAR_CHECKPOINT"
+	TargetJSON         string                 `json:"archivo_json_destino"` // "checkpoint_auditoria.json", "auditoria_global_activa.json" o "AMBOS"
+	CamposAModificar   map[string]interface{} `json:"campos_a_modificar"`   // Solo las llaves a cambiar (ej: "archivo_actual": "app.vue")
+	Timestamp          time.Time              `json:"timestamp"`
+}
+
+
 var (
 	tasks       = make(map[string]Task)
 	mu          sync.Mutex
@@ -309,6 +318,45 @@ func ArchivarAuditoriaGlobalRemoto(idSesion string, documentos []DocumentacionAn
     return nil
 }
 
+func actualizarCheckpointRemoto(
+	targetJSON string, 
+	idPadre string, 
+	cambios map[string]interface{},
+) {
+	apiURL := os.Getenv("BUZON_SYNC_URL")
+	if apiURL == "" {
+		log.Println("⚠️ [RENDER]: BUZON_SYNC_URL no definida. Omitiendo envío remoto.")
+		return
+	}
+
+	// Agregamos automáticamente la estampa de tiempo a los cambios
+	cambios["ultima_actualizacion"] = time.Now().Format(time.RFC3339)
+
+	payload := MensajeDireccionadoCheckpoint{
+		TipoAccion:       "MUTAR_CHECKPOINT",
+		TargetJSON:       targetJSON,
+		CamposAModificar: cambios,
+		Timestamp:        time.Now(),
+	}
+
+	jsonBytes, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("❌ [RENDER]: Error al serializar payload de mutación: %v\n", err)
+		return
+	}
+
+	resp, err := http.Post(apiURL+"/checkpoint", "application/json", bytes.NewBuffer(jsonBytes))
+	if err != nil {
+		log.Printf("❌ [RENDER]: Error de red al enviar mutación remota: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+    log.Printf("----->>📡 [RENDER -> WORKER]: Actualizando datos de Render en el worker local para '%s'...\n", targetJSON)
+	log.Printf("📡 [RENDER -> WORKER]: Mutación enviada para '%s' (Sesión: %s)\n", targetJSON, idPadre)
+}
+
+
 func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
     total := len(payload.ArchivosFisicos)
     if total == 0 {
@@ -322,6 +370,18 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
         archivoActual := payload.ArchivosFisicos[i]
         currentFilePath := archivoActual.Ruta
         contenidoCodigo := archivoActual.Contenido
+
+        // 1️⃣ Momento clave: Al iniciar la lectura del archivo físico completo, 
+        // notificamos a la Linux local para que actualice "archivo_actual" en el checkpoint.
+        actualizarCheckpointRemoto(
+            "checkpoint_auditoria.json",
+            payload.IDPadre,
+            map[string]interface{}{
+                "archivo_actual":      currentFilePath,
+                "archivos_procesados": i,
+                "estado_global":       "AUDITANDO",
+            },
+        )
 
         log.Printf("🔄 [☁️ RENDER - AUDITORÍA]: Iniciando chunking y auditoría profunda del archivo (%d/%d): %s\n", i+1, total, currentFilePath)
 
@@ -464,8 +524,49 @@ func ejecutarAuditoriaEnNube(taskID string, payload TaskPayload) {
                     TieneRecomendaciones: true,
                 }
                 documentosAuditados = append(documentosAuditados, nuevoDoc)
+
+                // 🚀 DISPARO ATÓMICO HACIA EL LINUX LOCAL: 
+                // Pasamos los 3 argumentos que tu función actual reclama.
+                actualizarCheckpointRemoto(
+                    "auditoria_global_activa.json",
+                    "",
+                    map[string]interface{}{
+                        "estado": "AUDITANDO",
+                        "agregar_archivo_idea": map[string]interface{}{
+                            "contenido_original":    hallazgosConsolidados.String(),
+                            "estado":               "AUDITADO_CON_IA",
+                            "file_path":            currentFilePath,
+                            "nombre_archivo":       currentFilePath,
+                            "peso_auditado":        fmt.Sprintf("%d bytes", pesoTotalBytes),
+                            "resumen_cambios":      dictamenFinal,
+                            "tiempo_procesamiento": tiempoTotalProceso.String(),
+                            "tiene_recomendaciones": true,
+                            "timestamp":            time.Now().Format(time.RFC3339),
+                        },
+                    },
+                )
+
+                // 📊 DISPARO DEL CHECKPOINT DE PROGRESO HACIA EL LINUX LOCAL:
+                // Actualizamos el estado de avance en checkpoint_auditoria.json
+                actualizarCheckpointRemoto(
+                    "checkpoint_auditoria.json",
+                    "",
+                    map[string]interface{}{
+                        "ultimo_auditado":        currentFilePath,
+                        "archivos_procesados":    i + 1,
+                        "porcentaje_avance":      ((i + 1) * 100) / total,
+                        "ultima_actualizacion":  time.Now().Format(time.RFC3339),
+                        "cola_archivos":          nil,
+                        "historial_auditoria":    nil,
+                    },
+                )
+
+
             }
         }
+
+        
+        
 
         // 💾 Guardado global y actualización del checkpoint con el archivo completado (i+1)
         errGlobal := ArchivarAuditoriaGlobalRemoto(payload.IDPadre, documentosAuditados)
